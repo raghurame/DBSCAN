@@ -7,11 +7,18 @@
 #include <time.h>
 #include <stdbool.h>
 
+typedef struct moleculeIndex
+{
+	int molID, start, end;
+} MOLECULEINDEX;
+
 typedef struct trajectory
 {
-	int atomID, atomType, molType, ix, iy, iz;
+	int atomID, atomType, molType, molID, ix, iy, iz;
 	float x, y, z;
 	int isEndGroup;
+	int clusterID; // this cluster ID is from DBSCAN
+	bool core, edge;
 } TRAJECTORY;
 
 typedef struct vector
@@ -77,7 +84,7 @@ typedef struct orderParameterBins
 	float orderParameter, rlo, rhi, count;
 } ORDERPARAMETER_BINS;
 
-TRAJECTORY *readTimestep (FILE *file_dump, TRAJECTORY *atoms, int nAtoms, int nAtomEntries, SIMULATION_BOUNDARY *boundary)
+TRAJECTORY *readTimestep (FILE *file_dump, TRAJECTORY *atoms, int nAtomEntries, SIMULATION_BOUNDARY *boundary)
 {
 	char lineString[2000];
 	int currentAtomID = 1;
@@ -90,11 +97,21 @@ TRAJECTORY *readTimestep (FILE *file_dump, TRAJECTORY *atoms, int nAtoms, int nA
 	fgets (lineString, 2000, file_dump); sscanf (lineString, "%f %f\n", &(*boundary).zlo, &(*boundary).zhi);
 	fgets (lineString, 2000, file_dump);
 
+	(*boundary).xLength = (*boundary).xhi - (*boundary).xlo;
+	(*boundary).yLength = (*boundary).yhi - (*boundary).ylo;
+	(*boundary).zLength = (*boundary).zhi - (*boundary).zlo;
+
 	for (int i = 0; i < nAtomEntries; ++i)
 	{
 		fgets (lineString, 2000, file_dump);
 		sscanf (lineString, "%d\n", &currentAtomID);
-		sscanf (lineString, "%d %d %f %f %f %d %d %d\n", &atoms[currentAtomID - 1].atomID, &atoms[currentAtomID - 1].atomType, &atoms[currentAtomID - 1].x, &atoms[currentAtomID - 1].y, &atoms[currentAtomID - 1].z, &atoms[currentAtomID - 1].ix, &atoms[currentAtomID - 1].iy, &atoms[currentAtomID - 1].iz);
+
+		if (currentAtomID > 0)
+		{
+			sscanf (lineString, "%d %d %d %d %f %f %f %d %d %d\n", &atoms[currentAtomID - 1].atomID, &atoms[currentAtomID - 1].atomType, &atoms[currentAtomID - 1].molID, &atoms[currentAtomID - 1].molType, &atoms[currentAtomID - 1].x, &atoms[currentAtomID - 1].y, &atoms[currentAtomID - 1].z, &atoms[currentAtomID - 1].ix, &atoms[currentAtomID - 1].iy, &atoms[currentAtomID - 1].iz);
+			// sscanf (lineString, "%d %d %f %f %f %d %d %d\n", &atoms[currentAtomID - 1].atomID, &atoms[currentAtomID - 1].atomType, &atoms[currentAtomID - 1].x, &atoms[currentAtomID - 1].y, &atoms[currentAtomID - 1].z, &atoms[currentAtomID - 1].ix, &atoms[currentAtomID - 1].iy, &atoms[currentAtomID - 1].iz);
+		}
+
 		atoms[currentAtomID - 1].isEndGroup = 0;
 	}
 
@@ -325,6 +342,7 @@ TRAJECTORY *initializeAtoms (TRAJECTORY *atoms, int nAtoms)
 		atoms[i].atomID = 0;
 		atoms[i].atomType = 0;
 		atoms[i].molType = 0;
+		atoms[i].molID = 0;
 		atoms[i].ix = 0;
 		atoms[i].iy = 0;
 		atoms[i].iz = 0;
@@ -332,6 +350,7 @@ TRAJECTORY *initializeAtoms (TRAJECTORY *atoms, int nAtoms)
 		atoms[i].y = 0;
 		atoms[i].z = 0;
 		atoms[i].isEndGroup = 0;
+		atoms[i].clusterID = 0;
 	}
 
 	return atoms;
@@ -416,11 +435,195 @@ int countNAtoms (FILE *file_dump, int *nAtomEntries)
 	return nAtomsFixed;
 }
 
+int countNMolecules (TRAJECTORY *atoms, int nMolecules, int nAtoms)
+{
+	nMolecules = 0;
+
+	for (int i = 0; i < nAtoms; ++i)
+	{
+		if (nMolecules < atoms[i].molID) {
+			nMolecules = atoms[i].molID; }
+	}
+
+	return nMolecules;
+}
+
+MOLECULEINDEX *getIndexOfMolecules (TRAJECTORY *atoms, int nAtoms, int nMolecules, MOLECULEINDEX *indexOfMolecules)
+{
+	int previousMolID = 0, currentMolID;
+
+	for (int i = 0; i < nAtoms; ++i)
+	{
+		currentMolID = atoms[i].molID;
+
+		if (currentMolID != previousMolID)
+		{
+			indexOfMolecules[currentMolID - 1].molID = currentMolID;
+			indexOfMolecules[currentMolID - 1].start = i;
+
+			if (currentMolID > 1) {
+				indexOfMolecules[currentMolID - 2].end = (i - 1); }
+		}
+
+		previousMolID = currentMolID;
+	}
+
+	return indexOfMolecules;
+}
+
+float translatePeriodicDistance (float x1, float x2, float simBoxLength, float newR)
+{
+	if (fabs (x1 - x2) > (simBoxLength / (float)2))
+	{
+		if (x1 >= x2) {
+			newR = x1 - simBoxLength; }
+		else if (x1 < x2) {
+			newR = x1 + simBoxLength; }
+
+		return newR;
+	}
+	else
+	{
+		return x1;
+	}
+}
+
+int **getNeighbours (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, int maxNeighbors, SIMULATION_BOUNDARY boundary, float thresholdDistance, int atomType)
+{
+	float newX, newY, newZ;
+	float distance;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomID > 0 && atoms[i].atomType == atomType)
+		{
+			for (int j = 0; j < nAtomEntries; ++j)
+			{
+				if (atoms[j].atomID > 0 && i != j && atoms[i].atomType == atomType)
+				{
+					newX = translatePeriodicDistance (atoms[i].x, atoms[j].x, boundary.xLength, newX);
+					newY = translatePeriodicDistance (atoms[i].y, atoms[j].y, boundary.yLength, newY);
+					newZ = translatePeriodicDistance (atoms[i].z, atoms[j].z, boundary.zLength, newZ);
+
+					distance = sqrt (
+						(newX - atoms[j].x) * (newX - atoms[j].x) +
+						(newY - atoms[j].y) * (newY - atoms[j].y) +
+						(newZ - atoms[j].z) * (newZ - atoms[j].z)
+						);
+
+					if (distance < thresholdDistance)
+					{
+						for (int k = 0; k < maxNeighbors; ++k)
+						{
+							if (neighbourIDs[i][k] == -1)
+							{
+								neighbourIDs[i][k] = (j + 1);
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return neighbourIDs;
+}
+
+// TRAJECTORY *markAtoms (TRAJECTORY *atoms, int nAtomEntries, float thresholdNeighbours, float thresholdDistance)
+// {
+// 	int maxNeighbors = ceil (thresholdNeighbours);
+
+// 	for (int i = 0; i < nAtomEntries; ++i)
+// 	{
+		
+// 	}
+
+// 	return atoms;
+// }
+
+int **initNeighIDs (int **neighbourIDs, int nAtomEntries, int maxNeighbors)
+{
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		for (int j = 0; j < maxNeighbors; ++j)
+		{
+			neighbourIDs[i][j] = -1;
+		}
+	}
+
+	return neighbourIDs;
+}
+
+TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int nAtomEntries, float thresholdNeighbours, float thresholdDistance, int maxNeighbors, int atomType)
+{
+	int nNeighbors;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomType == atomType)
+		{
+			nNeighbors = 0;
+
+			for (int j = 0; j < maxNeighbors; ++j)
+			{
+				if (neighbourIDs[i][j] != -1) {
+					nNeighbors++; }
+			}
+
+			if (nNeighbors == thresholdNeighbours)
+			{
+				atoms[i].core = 1;
+
+				for (int j = 0; j < maxNeighbors; ++j)
+				{
+					if (atoms[neighbourIDs[i][j] - 1].atomType == atomType)
+					{
+						atoms[neighbourIDs[i][j] - 1].edge = 1;
+					}
+				}
+			}
+		}
+	}
+
+	return atoms;
+}
+
+int countNCores (TRAJECTORY *atoms, int nAtomEntries, int nCore)
+{
+	nCore = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].core == 1) {
+			nCore++; }
+	}
+
+	return nCore;
+}
+
+int countNEdge (TRAJECTORY *atoms, int nAtomEntries, int nEdge)
+{
+	nEdge = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].edge == 1 && atoms[i].core == 0) {
+			nEdge++; }
+	}
+
+	return nEdge;
+}
+
 int main(int argc, char const *argv[])
 {
 	FILE *file_dump, *file_data;
 	file_dump = fopen (argv[1], "r");
 	file_data = fopen (argv[2], "w");
+
+	float thresholdDistance = atof (argv[3]), thresholdNeighbours = atof (argv[4]);
+	int atomType = atoi (argv[5]);
+	int maxNeighbors = ceil (thresholdNeighbours);
 
 	int file_status, nAtoms, currentTimeframe = 0, nAtomEntries;
 	nAtoms = countNAtoms (file_dump, &nAtomEntries);
@@ -442,31 +645,47 @@ int main(int argc, char const *argv[])
 
 	atoms = initializeAtoms (atoms, nAtoms);
 
-
-	// Find the RDF
-	// Get the end of first peak,
-	// then use it as a cutoff to find the number of nearest neighbors
-
+	int nMolecules = 0;
+	MOLECULEINDEX *indexOfMolecules;
 
 	rewind (file_dump);
 	file_status = 1;
+
+	int **neighbourIDs;
+	neighbourIDs = (int **) malloc (nAtomEntries * sizeof (int *));
+
+	for (int i = 0; i < nAtomEntries; ++i) {
+		neighbourIDs[i] = (int *) malloc (maxNeighbors * sizeof (int)); }
+
+	neighbourIDs = initNeighIDs (neighbourIDs, nAtomEntries, maxNeighbors);
+	int nCore, nEdge;
+
 	while (file_status != EOF)
 	{
 		fprintf(stdout, "computing timestep: %d...                                                            \n", currentTimeframe);
 		fflush (stdout);
 
-		atoms = readTimestep (file_dump, atoms, nAtoms, nAtomEntries, &boundary);
-		atoms = initializeMolID (atoms, nAtoms);
-		atoms = assignMolID (atoms, nAtoms);
+		atoms = readTimestep (file_dump, atoms, nAtomEntries, &boundary);
+		neighbourIDs = initNeighIDs (neighbourIDs, nAtomEntries, maxNeighbors);
+		neighbourIDs = getNeighbours (atoms, nAtomEntries, neighbourIDs, maxNeighbors, boundary, thresholdDistance, atomType);
+		atoms = markCoreAtoms (atoms, neighbourIDs, nAtomEntries, thresholdNeighbours, thresholdDistance, maxNeighbors, atomType);
+		nCore = countNCores (atoms, nAtomEntries, nCore);
+		nEdge = countNEdge (atoms, nAtomEntries, nEdge);
 
+		printf("edge: %d; core: %d\n", nEdge, nCore);
+		usleep (100000);
 
-		// Find the number of nearest neighbors
+		if (currentTimeframe == 0)
+		{
+			nMolecules = countNMolecules (atoms, nMolecules, nAtoms);
+			indexOfMolecules = (MOLECULEINDEX *) malloc (nMolecules * sizeof (MOLECULEINDEX));
+			indexOfMolecules = getIndexOfMolecules (atoms, nAtoms, nMolecules, indexOfMolecules);
+		}
 
 		// DBSCAN
 		// Use the end of first peak in nearest neighbors and
 		// use the end of first peak in rdf
 		// for dbscan analysis.
-
 
 		file_status = fgetc (file_dump);
 		currentTimeframe++;

@@ -351,6 +351,8 @@ TRAJECTORY *initializeAtoms (TRAJECTORY *atoms, int nAtoms)
 		atoms[i].z = 0;
 		atoms[i].isEndGroup = 0;
 		atoms[i].clusterID = 0;
+		atoms[i].core = false;
+		atoms[i].edge = false;
 	}
 
 	return atoms;
@@ -499,7 +501,7 @@ int **getNeighbours (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, in
 		{
 			for (int j = 0; j < nAtomEntries; ++j)
 			{
-				if (atoms[j].atomID > 0 && i != j && atoms[i].atomType == atomType)
+				if (atoms[j].atomID > 0 && i != j && atoms[i].atomType == atomType && atoms[i].molID != atoms[j].molID)
 				{
 					newX = translatePeriodicDistance (atoms[i].x, atoms[j].x, boundary.xLength, newX);
 					newY = translatePeriodicDistance (atoms[i].y, atoms[j].y, boundary.yLength, newY);
@@ -555,7 +557,7 @@ int **initNeighIDs (int **neighbourIDs, int nAtomEntries, int maxNeighbors)
 	return neighbourIDs;
 }
 
-TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int nAtomEntries, float thresholdNeighbours, float thresholdDistance, int maxNeighbors, int atomType)
+TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int nAtomEntries, float thresholdNeighbours, float thresholdDistance, int maxNeighbors, int atomType, int currentTimeframe)
 {
 	int nNeighbors;
 
@@ -571,15 +573,18 @@ TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int nAtomEntri
 					nNeighbors++; }
 			}
 
-			if (nNeighbors == thresholdNeighbours)
+			if (nNeighbors >= thresholdNeighbours)
 			{
-				atoms[i].core = 1;
+				atoms[i].core = true;
 
 				for (int j = 0; j < maxNeighbors; ++j)
 				{
-					if (atoms[neighbourIDs[i][j] - 1].atomType == atomType)
+					if (neighbourIDs[i][j] > -1)
 					{
-						atoms[neighbourIDs[i][j] - 1].edge = 1;
+						if (atoms[neighbourIDs[i][j] - 1].atomType == atomType)
+						{
+							atoms[neighbourIDs[i][j] - 1].edge = true;
+						}
 					}
 				}
 			}
@@ -595,7 +600,7 @@ int countNCores (TRAJECTORY *atoms, int nAtomEntries, int nCore)
 
 	for (int i = 0; i < nAtomEntries; ++i)
 	{
-		if (atoms[i].core == 1) {
+		if (atoms[i].core == true) {
 			nCore++; }
 	}
 
@@ -608,22 +613,100 @@ int countNEdge (TRAJECTORY *atoms, int nAtomEntries, int nEdge)
 
 	for (int i = 0; i < nAtomEntries; ++i)
 	{
-		if (atoms[i].edge == 1 && atoms[i].core == 0) {
+		if (atoms[i].edge == true && atoms[i].core == false) {
 			nEdge++; }
 	}
 
 	return nEdge;
 }
 
+int *shuffleInt (int *array, int n)
+{
+	if (n > 1) 
+	{
+		int i;
+		for (i = 0; i < n - 1; i++) 
+		{
+			int j = i + rand() / (RAND_MAX / (n - i) + 1);
+			int t = array[j];
+			array[j] = array[i];
+			array[i] = t;
+		}
+	}
+
+	return array;
+}
+
+TRAJECTORY *assignClusterID (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, int maxNeighbors, int atomType, MOLECULEINDEX *indexOfMolecules)
+{
+	int *randAtomIDs, currentID;
+	randAtomIDs = (int *) malloc (nAtomEntries * sizeof (int));
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		randAtomIDs[i] = i;
+	}
+
+	// creating random number array to have random sequence for the clustering algorithm
+	randAtomIDs = shuffleInt (randAtomIDs, nAtomEntries);
+
+	// assign clusters sequentially, unique cluster ID to each atom
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		// currentID = randAtomIDs[i];
+
+		if (atoms[i].atomID > 0 && atoms[i].atomType == atomType)
+		{
+			atoms[i].clusterID = i + 1;
+			// printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\n", atoms[i].atomID, atoms[i].atomType, atoms[i].molID, atoms[i].molType, atoms[i].core, atoms[i].edge, atoms[i].clusterID);
+			// usleep (100000);
+		}
+	}
+
+	// reassign cluster ID based on molecule ID.
+
+	// reassign cluster ID based on the nearest neighbour IDs.
+	int nChanged = 0;
+
+	do
+	{
+		nChanged = 0;
+
+		for (int i = 0; i < nAtomEntries; ++i)
+		{
+			if (atoms[i].atomType == atomType)
+			{
+				for (int j = 0; j < maxNeighbors; ++j)
+				{
+					if (neighbourIDs[i][j] != -1 && atoms[neighbourIDs[i][j] - 1].clusterID < atoms[i].clusterID)
+					{
+						atoms[i].clusterID = atoms[neighbourIDs[i][j] - 1].clusterID;
+						nChanged++;
+					}
+				}
+			}
+		}
+
+	} while (nChanged > 0)
+
+	return atoms;
+}
+
 int main(int argc, char const *argv[])
 {
+	if (argc != 7)
+	{
+		printf("INSUFFICIENT ARGUMENTS PASSED:\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n {~} argv[0] = program\n {~} argv[1] = input dump file\n {~} argv[2] = input data file\n {~} argv[3] = threshold distance\n {~} argv[4] = threshold neighbours\n {~} argv[5] = atom type to consider\n {~} argv[6] = maximum neighbours possible for each atom\n\n");
+		exit (1);
+	}
+
 	FILE *file_dump, *file_data;
 	file_dump = fopen (argv[1], "r");
 	file_data = fopen (argv[2], "w");
 
 	float thresholdDistance = atof (argv[3]), thresholdNeighbours = atof (argv[4]);
 	int atomType = atoi (argv[5]);
-	int maxNeighbors = ceil (thresholdNeighbours);
+	int maxNeighbors = atoi (argv[6]);
 
 	int file_status, nAtoms, currentTimeframe = 0, nAtomEntries;
 	nAtoms = countNAtoms (file_dump, &nAtomEntries);
@@ -662,15 +745,29 @@ int main(int argc, char const *argv[])
 
 	while (file_status != EOF)
 	{
-		fprintf(stdout, "computing timestep: %d...                                                            \n", currentTimeframe);
+		// fprintf(stdout, "computing timestep: %d...                                                            \n", currentTimeframe);
 		fflush (stdout);
 
+		atoms = initializeAtoms (atoms, nAtoms);
 		atoms = readTimestep (file_dump, atoms, nAtomEntries, &boundary);
 		neighbourIDs = initNeighIDs (neighbourIDs, nAtomEntries, maxNeighbors);
 		neighbourIDs = getNeighbours (atoms, nAtomEntries, neighbourIDs, maxNeighbors, boundary, thresholdDistance, atomType);
-		atoms = markCoreAtoms (atoms, neighbourIDs, nAtomEntries, thresholdNeighbours, thresholdDistance, maxNeighbors, atomType);
+
+		// for (int i = 0; i < nAtomEntries; ++i)
+		// {
+		// 	printf("%d => ", (i + 1));
+		// 	for (int j = 0; j < maxNeighbors; ++j)
+		// 	{
+		// 		printf("%d ", neighbourIDs[i][j]);
+		// 	}
+		// 	printf("\n");
+		// 	usleep (100000);
+		// }
+
+		atoms = markCoreAtoms (atoms, neighbourIDs, nAtomEntries, thresholdNeighbours, thresholdDistance, maxNeighbors, atomType, currentTimeframe);
 		nCore = countNCores (atoms, nAtomEntries, nCore);
 		nEdge = countNEdge (atoms, nAtomEntries, nEdge);
+		atoms = assignClusterID (atoms, nAtomEntries, neighbourIDs, maxNeighbors, atomType, indexOfMolecules);
 
 		printf("edge: %d; core: %d\n", nEdge, nCore);
 		usleep (100000);

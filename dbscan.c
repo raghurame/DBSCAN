@@ -18,7 +18,10 @@ typedef struct trajectory
 	float x, y, z;
 	int isEndGroup;
 	int clusterID; // this cluster ID is from DBSCAN
-	bool core, edge;
+	int clusterID2; // this cluster ID is from the modified DBSCAN
+	bool core, edge; // these two boolean variables are from the classical DBSCAN, where I am measuring the coordination number between the like atoms
+	bool core2, edge2; // these two boolean variables are from the modified DBSCAN. I am measuring the coordination number between the target atom and other atoms of different atom types.
+	int nNeighbors, nNeighbors2; // number of neighbours calculated from both the original DBSCAN and also from the modified DBSCAN
 } TRAJECTORY;
 
 typedef struct vector
@@ -110,9 +113,9 @@ TRAJECTORY *readTimestep (FILE *file_dump, TRAJECTORY *atoms, int nAtomEntries, 
 		{
 			sscanf (lineString, "%d %d %d %d %f %f %f %d %d %d\n", &atoms[currentAtomID - 1].atomID, &atoms[currentAtomID - 1].atomType, &atoms[currentAtomID - 1].molID, &atoms[currentAtomID - 1].molType, &atoms[currentAtomID - 1].x, &atoms[currentAtomID - 1].y, &atoms[currentAtomID - 1].z, &atoms[currentAtomID - 1].ix, &atoms[currentAtomID - 1].iy, &atoms[currentAtomID - 1].iz);
 			// sscanf (lineString, "%d %d %f %f %f %d %d %d\n", &atoms[currentAtomID - 1].atomID, &atoms[currentAtomID - 1].atomType, &atoms[currentAtomID - 1].x, &atoms[currentAtomID - 1].y, &atoms[currentAtomID - 1].z, &atoms[currentAtomID - 1].ix, &atoms[currentAtomID - 1].iy, &atoms[currentAtomID - 1].iz);
+			atoms[currentAtomID - 1].isEndGroup = 0;
 		}
 
-		atoms[currentAtomID - 1].isEndGroup = 0;
 	}
 
 	return atoms;
@@ -353,6 +356,11 @@ TRAJECTORY *initializeAtoms (TRAJECTORY *atoms, int nAtoms)
 		atoms[i].clusterID = 0;
 		atoms[i].core = false;
 		atoms[i].edge = false;
+		atoms[i].core2 = false;
+		atoms[i].edge2 = false;
+		atoms[i].clusterID2 = 0;
+		atoms[i].nNeighbors = 0;
+		atoms[i].nNeighbors2 = 0;
 	}
 
 	return atoms;
@@ -501,7 +509,7 @@ int **getNeighbours (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, in
 		{
 			for (int j = 0; j < nAtomEntries; ++j)
 			{
-				if (atoms[j].atomID > 0 && i != j && atoms[i].atomType == atomType && atoms[i].molID != atoms[j].molID)
+				if (atoms[j].atomID > 0 && i != j && atoms[j].atomType == atomType && atoms[i].molID != atoms[j].molID)
 				{
 					newX = translatePeriodicDistance (atoms[i].x, atoms[j].x, boundary.xLength, newX);
 					newY = translatePeriodicDistance (atoms[i].y, atoms[j].y, boundary.yLength, newY);
@@ -532,17 +540,47 @@ int **getNeighbours (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, in
 	return neighbourIDs;
 }
 
-// TRAJECTORY *markAtoms (TRAJECTORY *atoms, int nAtomEntries, float thresholdNeighbours, float thresholdDistance)
-// {
-// 	int maxNeighbors = ceil (thresholdNeighbours);
+int **getNeighbours2 (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, int maxNeighbors, SIMULATION_BOUNDARY boundary, float thresholdDistance, int atomType)
+{
+	float newX, newY, newZ;
+	float distance;
 
-// 	for (int i = 0; i < nAtomEntries; ++i)
-// 	{
-		
-// 	}
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomID > 0 && atoms[i].atomType == atomType)
+		{
+			for (int j = 0; j < nAtomEntries; ++j)
+			{
+				if (atoms[j].atomID > 0 && i != j && atoms[j].atomType == 5 && atoms[i].molID != atoms[j].molID)
+				{
+					newX = translatePeriodicDistance (atoms[i].x, atoms[j].x, boundary.xLength, newX);
+					newY = translatePeriodicDistance (atoms[i].y, atoms[j].y, boundary.yLength, newY);
+					newZ = translatePeriodicDistance (atoms[i].z, atoms[j].z, boundary.zLength, newZ);
 
-// 	return atoms;
-// }
+					distance = sqrt (
+						(newX - atoms[j].x) * (newX - atoms[j].x) +
+						(newY - atoms[j].y) * (newY - atoms[j].y) +
+						(newZ - atoms[j].z) * (newZ - atoms[j].z)
+						);
+
+					if (distance < thresholdDistance)
+					{
+						for (int k = 0; k < maxNeighbors; ++k)
+						{
+							if (neighbourIDs[i][k] == -1)
+							{
+								neighbourIDs[i][k] = (j + 1);
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return neighbourIDs;
+}
 
 int **initNeighIDs (int **neighbourIDs, int nAtomEntries, int maxNeighbors)
 {
@@ -557,23 +595,24 @@ int **initNeighIDs (int **neighbourIDs, int nAtomEntries, int maxNeighbors)
 	return neighbourIDs;
 }
 
-TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int nAtomEntries, float thresholdNeighbours, float thresholdDistance, int maxNeighbors, int atomType, int currentTimeframe)
+TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int **neighbourIDs2, int nAtomEntries, float thresholdNeighbours, float thresholdDistance, int maxNeighbors, int atomType, int currentTimeframe)
 {
 	int nNeighbors;
 
+	// original algorithm
 	for (int i = 0; i < nAtomEntries; ++i)
 	{
 		if (atoms[i].atomType == atomType)
 		{
-			nNeighbors = 0;
+			atoms[i].nNeighbors = 0;
 
 			for (int j = 0; j < maxNeighbors; ++j)
 			{
 				if (neighbourIDs[i][j] != -1) {
-					nNeighbors++; }
+					atoms[i].nNeighbors += 1; }
 			}
 
-			if (nNeighbors >= thresholdNeighbours)
+			if (atoms[i].nNeighbors >= thresholdNeighbours)
 			{
 				atoms[i].core = true;
 
@@ -584,6 +623,56 @@ TRAJECTORY *markCoreAtoms (TRAJECTORY *atoms, int **neighbourIDs, int nAtomEntri
 						if (atoms[neighbourIDs[i][j] - 1].atomType == atomType)
 						{
 							atoms[neighbourIDs[i][j] - 1].edge = true;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// modified algorithm
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomType == atomType)
+		{
+			atoms[i].nNeighbors2 = 0;
+
+			for (int j = 0; j < maxNeighbors; ++j)
+			{
+				// counting the number of Br atoms near C atoms
+				if (neighbourIDs2[i][j] != -1) {
+					atoms[i].nNeighbors2 += 1; }
+			}
+
+			if (atoms[i].nNeighbors2 >= 2)
+			{
+				atoms[i].edge2 = true;
+
+				// iterating through the number of C atoms near C atoms
+				// this is different from the previous check, where Br neighboring atoms are considered
+				for (int j = 0; j < maxNeighbors; ++j)
+				{
+					if (neighbourIDs[i][j] > -1)
+					{
+						if (atoms[neighbourIDs[i][j] - 1].atomType == atomType)
+						{
+							atoms[neighbourIDs[i][j] - 1].edge2 = true;
+						}
+					}
+				}
+			}
+
+			else if (atoms[i].nNeighbors2 < 2)
+			{
+				atoms[i].core2 = true;
+
+				for (int j = 0; j < maxNeighbors; ++j)
+				{
+					if (neighbourIDs[i][j] > -1)
+					{
+						if (atoms[neighbourIDs[i][j] - 1].atomType == atomType)
+						{
+							atoms[neighbourIDs[i][j] - 1].edge2 = true;
 						}
 					}
 				}
@@ -607,6 +696,19 @@ int countNCores (TRAJECTORY *atoms, int nAtomEntries, int nCore)
 	return nCore;
 }
 
+int countNCores2 (TRAJECTORY *atoms, int nAtomEntries, int nCore2)
+{
+	nCore2 = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].core2 == true) {
+			nCore2++; }
+	}
+
+	return nCore2;
+}
+
 int countNEdge (TRAJECTORY *atoms, int nAtomEntries, int nEdge)
 {
 	nEdge = 0;
@@ -618,6 +720,19 @@ int countNEdge (TRAJECTORY *atoms, int nAtomEntries, int nEdge)
 	}
 
 	return nEdge;
+}
+
+int countNEdge2 (TRAJECTORY *atoms, int nAtomEntries, int nEdge2)
+{
+	nEdge2 = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].edge2 == true && atoms[i].core2 == false) {
+			nEdge2++; }
+	}
+
+	return nEdge2;
 }
 
 int *shuffleInt (int *array, int n)
@@ -637,15 +752,39 @@ int *shuffleInt (int *array, int n)
 	return array;
 }
 
-TRAJECTORY *assignClusterID (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, int maxNeighbors, int atomType, MOLECULEINDEX *indexOfMolecules)
+TRAJECTORY *changeMolClusterID (TRAJECTORY *atoms, int nAtomEntries, int atomType, MOLECULEINDEX *indexOfMolecules, int nMolecules, int currentMolecule, int newClusterID)
 {
-	int *randAtomIDs, currentID;
+	for (int i = indexOfMolecules[currentMolecule - 1].start; i <= indexOfMolecules[currentMolecule - 1].end; ++i)
+	{
+		atoms[i].clusterID = newClusterID;
+	}
+
+	return atoms;
+}
+
+TRAJECTORY *changeMolClusterID2 (TRAJECTORY *atoms, int nAtomEntries, int atomType, MOLECULEINDEX *indexOfMolecules, int nMolecules, int currentMolecule, int newClusterID)
+{
+	for (int i = indexOfMolecules[currentMolecule - 1].start; i <= indexOfMolecules[currentMolecule - 1].end; ++i)
+	{
+		atoms[i].clusterID2 = newClusterID;
+	}
+
+	return atoms;
+}
+
+TRAJECTORY *assignClusterID (TRAJECTORY *atoms, int nAtomEntries, int **neighbourIDs, int **neighbourIDs2, int maxNeighbors, int atomType, MOLECULEINDEX *indexOfMolecules, int nMolecules)
+{
+	int *randAtomIDs, currentID, *clusterID_histogram;
 	randAtomIDs = (int *) malloc (nAtomEntries * sizeof (int));
+	clusterID_histogram = (int *) malloc ((nAtomEntries + 1) * sizeof (int));
 
 	for (int i = 0; i < nAtomEntries; ++i)
 	{
 		randAtomIDs[i] = i;
+		clusterID_histogram[i] = 0;
 	}
+
+	clusterID_histogram[nAtomEntries] = 0;
 
 	// creating random number array to have random sequence for the clustering algorithm
 	randAtomIDs = shuffleInt (randAtomIDs, nAtomEntries);
@@ -658,15 +797,15 @@ TRAJECTORY *assignClusterID (TRAJECTORY *atoms, int nAtomEntries, int **neighbou
 		if (atoms[i].atomID > 0 && atoms[i].atomType == atomType)
 		{
 			atoms[i].clusterID = i + 1;
-			// printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\n", atoms[i].atomID, atoms[i].atomType, atoms[i].molID, atoms[i].molType, atoms[i].core, atoms[i].edge, atoms[i].clusterID);
+			atoms[i].clusterID2 = i + 1;
+			// printf("%d\t%d\t%d\n", i, atoms[i].atomID, atoms[i].clusterID);
 			// usleep (100000);
 		}
 	}
 
-	// reassign cluster ID based on molecule ID.
-
+	// ORIGINAL DBSCAN
 	// reassign cluster ID based on the nearest neighbour IDs.
-	int nChanged = 0;
+	int nChanged = 0, nChanged_prev = -1;
 
 	do
 	{
@@ -674,22 +813,235 @@ TRAJECTORY *assignClusterID (TRAJECTORY *atoms, int nAtomEntries, int **neighbou
 
 		for (int i = 0; i < nAtomEntries; ++i)
 		{
-			if (atoms[i].atomType == atomType)
+			// if 'i'th atom is an edge
+			// then take the cluster id from a nearby core
+			if (atoms[i].atomType == atomType && atoms[i].core == false && atoms[i].edge == true)
 			{
 				for (int j = 0; j < maxNeighbors; ++j)
 				{
-					if (neighbourIDs[i][j] != -1 && atoms[neighbourIDs[i][j] - 1].clusterID < atoms[i].clusterID)
+					if (neighbourIDs[i][j] > 0)
 					{
-						atoms[i].clusterID = atoms[neighbourIDs[i][j] - 1].clusterID;
-						nChanged++;
+						if (neighbourIDs[i][j] != -1)
+						{
+							if (atoms[neighbourIDs[i][j] - 1].core == true && atoms[i].clusterID != atoms[neighbourIDs[i][j] - 1].clusterID)
+							{
+								// printf("1: %d (%d, %d, %d) -> %d (%d, %d, %d)\n", atoms[i].clusterID, atoms[i].atomID, atoms[i].core, atoms[i].edge, atoms[neighbourIDs[i][j] - 1].clusterID, atoms[neighbourIDs[i][j] - 1].atomID, atoms[neighbourIDs[i][j] - 1].core, atoms[neighbourIDs[i][j] - 1].edge);
+								atoms[i].clusterID = atoms[neighbourIDs[i][j] - 1].clusterID;
+								// atoms = changeMolClusterID (atoms, nAtomEntries, atomType, indexOfMolecules, nMolecules, atoms[i].molID, atoms[neighbourIDs[i][j] - 1].clusterID);
+								nChanged++;
+							}
+						}
+					}
+				}
+			}
+			// if 'i'th atom is a core
+			else if (atoms[i].atomType == atomType && atoms[i].core == true)
+			{
+				for (int j = 0; j < maxNeighbors; ++j)
+				{
+					if (neighbourIDs[i][j] > 0)
+					{
+						if (neighbourIDs[i][j] != -1)
+						{
+							// if the neighbor atom is a core too, and the neighbor cluster ID is smaller
+							if (atoms[neighbourIDs[i][j] - 1].clusterID < atoms[i].clusterID && atoms[neighbourIDs[i][j] - 1].core == true && atoms[i].clusterID != atoms[neighbourIDs[i][j] - 1].clusterID)
+							{
+								// printf("2: %d (%d, %d, %d) -> %d (%d, %d, %d)\n", atoms[i].clusterID, atoms[i].atomID, atoms[i].core, atoms[i].edge, atoms[neighbourIDs[i][j] - 1].clusterID, atoms[neighbourIDs[i][j] - 1].atomID, atoms[neighbourIDs[i][j] - 1].core, atoms[neighbourIDs[i][j] - 1].edge);
+								// atoms = changeMolClusterID (atoms, nAtomEntries, atomType, indexOfMolecules, nMolecules, atoms[i].molID, atoms[neighbourIDs[i][j] - 1].clusterID);
+								nChanged++;
+							}
+							// if the neighbor atom is a core too, and the neighbor cluster ID is larger
+							else if (atoms[neighbourIDs[i][j] - 1].clusterID > atoms[i].clusterID && atoms[neighbourIDs[i][j] - 1].core == true && atoms[i].clusterID != atoms[neighbourIDs[i][j] - 1].clusterID)
+							{
+								// printf("3: %d (%d, %d, %d) -> %d (%d, %d, %d)\n", atoms[i].clusterID, atoms[i].atomID, atoms[i].core, atoms[i].edge, atoms[neighbourIDs[i][j] - 1].clusterID, atoms[neighbourIDs[i][j] - 1].atomID, atoms[neighbourIDs[i][j] - 1].core, atoms[neighbourIDs[i][j] - 1].edge);
+								atoms[neighbourIDs[i][j] - 1].clusterID = atoms[i].clusterID;
+								// atoms = changeMolClusterID (atoms, nAtomEntries, atomType, indexOfMolecules, nMolecules, atoms[i].molID, atoms[neighbourIDs[i][j] - 1].clusterID);
+								nChanged++;
+							}
+
+							// if the neigbor atom is an edge
+							else if (atoms[neighbourIDs[i][j] - 1].core == false && atoms[neighbourIDs[i][j] - 1].edge == true && atoms[i].clusterID != atoms[neighbourIDs[i][j] - 1].clusterID)
+							{
+								// printf("4: %d (%d, %d, %d) -> %d (%d, %d, %d)\n", atoms[i].clusterID, atoms[i].atomID, atoms[i].core, atoms[i].edge, atoms[neighbourIDs[i][j] - 1].clusterID, atoms[neighbourIDs[i][j] - 1].atomID, atoms[neighbourIDs[i][j] - 1].core, atoms[neighbourIDs[i][j] - 1].edge);
+								atoms[neighbourIDs[i][j] - 1].clusterID = atoms[i].clusterID;
+								nChanged++;
+							}
+						}
 					}
 				}
 			}
 		}
 
-	} while (nChanged > 0)
+		// printf("changed1: %d\n", nChanged);
+		// usleep (100000);
+
+		if (nChanged == nChanged_prev) {
+			break; }
+
+		nChanged_prev = nChanged;
+
+	} while (1);
+
+	// MODIFIED DBSCAN
+	// nChanged = 0;
+
+	// do
+	// {
+	// 	nChanged = 0;
+
+	// 	for (int i = 0; i < nAtomEntries; ++i)
+	// 	{
+	// 		if (atoms[i].atomType == atomType)
+	// 		{
+	// 			// printf("%d %d %d %d\n", atoms[i].atomID, atoms[i].core, atoms[i].edge, atoms[i].clusterID);
+	// 			// usleep (100000);
+	// 			for (int j = 0; j < maxNeighbors; ++j)
+	// 			{
+	// 				if (neighbourIDs2[i][j] > 0)
+	// 				{
+	// 					if (neighbourIDs2[i][j] != -1 && atoms[neighbourIDs2[i][j] - 1].clusterID2 < atoms[i].clusterID2 && atoms[neighbourIDs2[i][j] - 1].core2 == true)
+	// 					{
+	// 						// printf("%d -> %d\n", atoms[i].clusterID2, atoms[neighbourIDs2[i][j] - 1].clusterID2);
+	// 						// usleep (10000);
+	// 						atoms[i].clusterID2 = atoms[neighbourIDs2[i][j] - 1].clusterID2;
+	// 						// atoms = changeMolClusterID2 (atoms, nAtomEntries, atomType, indexOfMolecules, nMolecules, atoms[i].molID, atoms[neighbourIDs2[i][j] - 1].clusterID2);
+	// 						nChanged++;
+	// 					}
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+
+	// 	printf("changed2: %d\n", nChanged);
+	// 	usleep (100000);
+
+	// } while (nChanged > 0);
+
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomID > 0 && atoms[i].atomType == atomType)
+		{
+			clusterID_histogram[atoms[i].clusterID] += 1;
+			// printf("-> %d %d %d\n", atoms[i].atomID, atoms[i].atomType, atoms[i].clusterID);
+			// usleep (100000);
+		}
+	}
+
+	// for (int i = 1; i < (nAtomEntries + 1); ++i)
+	// {
+	// 	if (clusterID_histogram[i] > 1)
+	// 	{
+	// 		printf("%d -> %d\n", i, clusterID_histogram[i]);
+	// 		usleep (100000);
+	// 	}
+	// }
+
+	// exit (1);
 
 	return atoms;
+}
+
+void countByMolecules (TRAJECTORY *atoms, int nAtomEntries, int *nCore_CTAB, int *nCore_CTAB2, int *nCore_DDAB, int *nCore_DDAB2, int *nEdge_CTAB, int *nEdge_CTAB2, int *nEdge_DDAB, int *nEdge_DDAB2, int atomType)
+{
+	(*nCore_CTAB) = 0;
+	(*nCore_DDAB) = 0;
+	(*nEdge_CTAB) = 0;
+	(*nEdge_DDAB) = 0;
+	(*nCore_CTAB2) = 0;
+	(*nCore_DDAB2) = 0;
+	(*nEdge_CTAB2) = 0;
+	(*nEdge_DDAB2) = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomID > 0)
+		{
+			if (atoms[i].molType == 1 && atoms[i].core == true && atoms[i].atomType == atomType) {
+				(*nCore_CTAB) += 1; }
+			if (atoms[i].molType == 1 && atoms[i].edge == true && atoms[i].core == false && atoms[i].atomType == atomType) {
+				(*nEdge_CTAB) += 1; }
+			if (atoms[i].molType == 2 && atoms[i].core == true && atoms[i].atomType == atomType) {
+				(*nCore_DDAB) += 1; }
+			if (atoms[i].molType == 2 && atoms[i].core == false && atoms[i].edge == true && atoms[i].atomType == atomType) {
+				(*nEdge_DDAB) += 1; }
+
+			if (atoms[i].molType == 1 && atoms[i].core2 == true && atoms[i].atomType == atomType) {
+				(*nCore_CTAB2) += 1; }
+			if (atoms[i].molType == 1 && atoms[i].edge2 == true && atoms[i].core2 == false && atoms[i].atomType == atomType) {
+				(*nEdge_CTAB2) += 1; }
+			if (atoms[i].molType == 2 && atoms[i].core2 == true && atoms[i].atomType == atomType) {
+				(*nCore_DDAB2) += 1; }
+			if (atoms[i].molType == 2 && atoms[i].core2 == false && atoms[i].edge2 == true && atoms[i].atomType == atomType) {
+				(*nEdge_DDAB2) += 1; }
+		}
+	}
+}
+
+void computeFractions (int nCore_CTAB, long double *fraction_core_CTAB, int nCore_DDAB, long double *fraction_core_DDAB, int nEdge_CTAB, long double *fraction_edge_CTAB, int nEdge_DDAB, long double *fraction_edge_DDAB, TRAJECTORY *atoms, int nAtomEntries, int atomType)
+{
+	int nDDABAtoms = 0, nCTABAtoms = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if ((atoms[i].molType == 1) && (atoms[i].atomType == atomType) && (atoms[i].atomID > 0))
+		{
+			nCTABAtoms++;
+		}
+		else if ((atoms[i].molType == 2) && (atoms[i].atomType == atomType) && (atoms[i].atomID > 0))
+		{
+			nDDABAtoms++;
+		}
+	}
+
+	(*fraction_core_CTAB) = (long double)nCore_CTAB / (long double)nCTABAtoms;
+	(*fraction_core_DDAB) = (long double)nCore_DDAB / (long double)nDDABAtoms;
+	(*fraction_edge_CTAB) = (long double)nEdge_CTAB / (long double)nCTABAtoms;
+	(*fraction_edge_DDAB) = (long double)nEdge_DDAB / (long double)nDDABAtoms;
+}
+
+void dumpClusters (FILE *file_dbscan_dump, TRAJECTORY *atoms, int nAtomEntries, int currentTimeframe, SIMULATION_BOUNDARY boundary, int nAtoms)
+{
+	int currentAtomID = 1, nAtomsActual = 0;
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].atomID > 0)
+		{
+			nAtomsActual++;
+		}
+	}
+
+	fprintf(file_dbscan_dump, "ITEM: TIMESTEP\n%d\nITEM: NUMBER OF ATOMS\n%d\nITEM: BOX BOUNDS pp pp pp\n%f %f\n%f %f\n%f %f\nITEM: ATOMS id type x y z ix iy iz\n", currentTimeframe + 1, nAtomsActual, boundary.xlo, boundary.xhi, boundary.ylo, boundary.yhi, boundary.zlo, boundary.zhi);
+
+	for (int i = 0; i < nAtomEntries; ++i)
+	{
+		if (atoms[i].molType == 1 && atoms[i].core == true && atoms[i].atomID > 0)
+		{
+			fprintf(file_dbscan_dump, "%d 1 %f %f %f %d %d %d\n", currentAtomID, atoms[i].x, atoms[i].y, atoms[i].z, atoms[i].ix, atoms[i].iy, atoms[i].iz);
+			currentAtomID++;
+		}
+		else if (atoms[i].molType == 1 && atoms[i].core == false && atoms[i].edge == true && atoms[i].atomID > 0)
+		{
+			fprintf(file_dbscan_dump, "%d 2 %f %f %f %d %d %d\n", currentAtomID, atoms[i].x, atoms[i].y, atoms[i].z, atoms[i].ix, atoms[i].iy, atoms[i].iz);
+			currentAtomID++;
+		}
+		else if (atoms[i].molType == 2 && atoms[i].core == true && atoms[i].atomID > 0)
+		{
+			fprintf(file_dbscan_dump, "%d 3 %f %f %f %d %d %d\n", currentAtomID, atoms[i].x, atoms[i].y, atoms[i].z, atoms[i].ix, atoms[i].iy, atoms[i].iz);
+			currentAtomID++;
+		}
+		else if (atoms[i].molType == 2 && atoms[i].core == true && atoms[i].edge == true && atoms[i].atomID > 0)
+		{
+			fprintf(file_dbscan_dump, "%d 4 %f %f %f %d %d %d\n", currentAtomID, atoms[i].x, atoms[i].y, atoms[i].z, atoms[i].ix, atoms[i].iy, atoms[i].iz);
+			currentAtomID++;
+		}
+		else if (atoms[i].atomID > 0)
+		{
+			fprintf(file_dbscan_dump, "%d 5 %f %f %f %d %d %d\n", currentAtomID, atoms[i].x, atoms[i].y, atoms[i].z, atoms[i].ix, atoms[i].iy, atoms[i].iz);
+			currentAtomID++;
+		}
+	}
 }
 
 int main(int argc, char const *argv[])
@@ -700,9 +1052,18 @@ int main(int argc, char const *argv[])
 		exit (1);
 	}
 
-	FILE *file_dump, *file_data;
+	FILE *file_dump, *file_data, *file_output, *file_dbscan_dump;
 	file_dump = fopen (argv[1], "r");
-	file_data = fopen (argv[2], "w");
+	file_data = fopen (argv[2], "r");
+
+	char *string_output, *string_dbscan_dump;
+	string_output = (char *) malloc (1000 * sizeof (char));
+	string_dbscan_dump = (char *) malloc (1000 * sizeof (char));
+
+	snprintf (string_output, 1000, "%s.dbscan", argv[1]);
+	snprintf (string_dbscan_dump, 1000, "%s.dbscan.dump", argv[1]);
+	file_output = fopen (string_output, "w");
+	file_dbscan_dump = fopen (string_dbscan_dump, "w");
 
 	float thresholdDistance = atof (argv[3]), thresholdNeighbours = atof (argv[4]);
 	int atomType = atoi (argv[5]);
@@ -734,43 +1095,67 @@ int main(int argc, char const *argv[])
 	rewind (file_dump);
 	file_status = 1;
 
-	int **neighbourIDs;
+	int **neighbourIDs, **neighbourIDs2;
 	neighbourIDs = (int **) malloc (nAtomEntries * sizeof (int *));
+	neighbourIDs2 = (int **) malloc (nAtomEntries * sizeof (int *));
 
 	for (int i = 0; i < nAtomEntries; ++i) {
 		neighbourIDs[i] = (int *) malloc (maxNeighbors * sizeof (int)); }
 
+	for (int i = 0; i < nAtomEntries; ++i) {
+		neighbourIDs2[i] = (int *) malloc (maxNeighbors * sizeof (int)); }
+
 	neighbourIDs = initNeighIDs (neighbourIDs, nAtomEntries, maxNeighbors);
+	neighbourIDs2 = initNeighIDs (neighbourIDs2, nAtomEntries, maxNeighbors);
 	int nCore, nEdge;
+	int nCore2, nEdge2;
+	int nCore_CTAB, nCore_DDAB;
+	int nCore_CTAB2, nCore_DDAB2;
+	int nEdge_CTAB, nEdge_DDAB;
+	int nEdge_CTAB2, nEdge_DDAB2;
+
+	long double fraction_edge_CTAB, fraction_edge_DDAB, fraction_core_CTAB, fraction_core_DDAB;
+
+	int tempNeighs;
+
+	fprintf(file_output, "cCTAB_frac, cCTAB, cDDAB_frac, cDDAB, eCTAB_frac, eCTAB, eDDAB_frac, eDDAB, c/eCTAB, c/eDDAB\n");
 
 	while (file_status != EOF)
 	{
-		// fprintf(stdout, "computing timestep: %d...                                                            \n", currentTimeframe);
+		fprintf(stdout, "computing timestep: %d...                                                            \n", currentTimeframe);
 		fflush (stdout);
 
 		atoms = initializeAtoms (atoms, nAtoms);
 		atoms = readTimestep (file_dump, atoms, nAtomEntries, &boundary);
 		neighbourIDs = initNeighIDs (neighbourIDs, nAtomEntries, maxNeighbors);
+		neighbourIDs2 = initNeighIDs (neighbourIDs2, nAtomEntries, maxNeighbors);
 		neighbourIDs = getNeighbours (atoms, nAtomEntries, neighbourIDs, maxNeighbors, boundary, thresholdDistance, atomType);
+		neighbourIDs2 = getNeighbours2 (atoms, nAtomEntries, neighbourIDs2, maxNeighbors, boundary, thresholdDistance, atomType);
 
 		// for (int i = 0; i < nAtomEntries; ++i)
 		// {
-		// 	printf("%d => ", (i + 1));
-		// 	for (int j = 0; j < maxNeighbors; ++j)
+		// 	if (atoms[i].atomID > 0)
 		// 	{
-		// 		printf("%d ", neighbourIDs[i][j]);
+		// 		printf("%d[%d/%d]\t", i + 1, atoms[i].molID, atoms[i].atomType);
+		// 		tempNeighs = 0;
+
+		// 		for (int j = 0; j < maxNeighbors; ++j)
+		// 		{
+		// 			if (neighbourIDs2[i][j] == -1)
+		// 			{
+		// 				printf("%d(-1) ", neighbourIDs2[i][j]);
+		// 			}
+		// 			else
+		// 			{
+		// 				tempNeighs++;
+		// 				printf("%d(%d) ", neighbourIDs2[i][j], atoms[neighbourIDs2[i][j] - 1].atomType);
+		// 			}
+		// 		}
+		// 		printf("\t%d", tempNeighs);
+		// 		printf("\n\n");
+		// 		usleep (100000);
 		// 	}
-		// 	printf("\n");
-		// 	usleep (100000);
 		// }
-
-		atoms = markCoreAtoms (atoms, neighbourIDs, nAtomEntries, thresholdNeighbours, thresholdDistance, maxNeighbors, atomType, currentTimeframe);
-		nCore = countNCores (atoms, nAtomEntries, nCore);
-		nEdge = countNEdge (atoms, nAtomEntries, nEdge);
-		atoms = assignClusterID (atoms, nAtomEntries, neighbourIDs, maxNeighbors, atomType, indexOfMolecules);
-
-		printf("edge: %d; core: %d\n", nEdge, nCore);
-		usleep (100000);
 
 		if (currentTimeframe == 0)
 		{
@@ -779,10 +1164,30 @@ int main(int argc, char const *argv[])
 			indexOfMolecules = getIndexOfMolecules (atoms, nAtoms, nMolecules, indexOfMolecules);
 		}
 
-		// DBSCAN
-		// Use the end of first peak in nearest neighbors and
-		// use the end of first peak in rdf
-		// for dbscan analysis.
+		atoms = markCoreAtoms (atoms, neighbourIDs, neighbourIDs2, nAtomEntries, thresholdNeighbours, thresholdDistance, maxNeighbors, atomType, currentTimeframe);
+
+		// for (int i = 0; i < nAtomEntries; ++i)
+		// {
+		// 	if (atoms[i].atomID > 0 && atoms[i].atomType == atomType)
+		// 	{
+		// 		printf("%d %d %d\n", atoms[i].atomID, atoms[i].nNeighbors, atoms[i].nNeighbors2);
+		// 		usleep (100000);
+		// 	}
+		// }
+
+		nCore = countNCores (atoms, nAtomEntries, nCore);
+		nCore2 = countNCores2 (atoms, nAtomEntries, nCore2);
+		nEdge = countNEdge (atoms, nAtomEntries, nEdge);
+		nEdge2 = countNEdge2 (atoms, nAtomEntries, nEdge2);
+		// assigning cluster IDs don't work, because some surfactant molecules bridge two self assembled structures sometimes.
+		// atoms = assignClusterID (atoms, nAtomEntries, neighbourIDs, neighbourIDs2, maxNeighbors, atomType, indexOfMolecules, nMolecules);
+		countByMolecules (atoms, nAtomEntries, &nCore_CTAB, &nCore_CTAB2, &nCore_DDAB, &nCore_DDAB2, &nEdge_CTAB, &nEdge_CTAB2, &nEdge_DDAB, &nEdge_DDAB2, atomType);
+		computeFractions (nCore_CTAB, &fraction_core_CTAB, nCore_DDAB, &fraction_core_DDAB, nEdge_CTAB, &fraction_edge_CTAB, nEdge_DDAB, &fraction_edge_DDAB, atoms, nAtomEntries, atomType);
+
+		// printf("core: %d/%d; edge: %d/%d\n", nCore, nCore2, nEdge, nEdge2);
+		fprintf(file_output, "%Lf, %d, %Lf, %d, %Lf, %d, %Lf, %d, %Lf, %Lf\n", fraction_core_CTAB, nCore_CTAB, fraction_core_DDAB, nCore_DDAB, fraction_edge_CTAB, nEdge_CTAB, fraction_edge_DDAB, nEdge_DDAB, (long double)fraction_core_CTAB/(long double)fraction_edge_CTAB, (long double)fraction_core_DDAB/(long double)fraction_edge_DDAB);
+
+		// dumpClusters (file_dbscan_dump, atoms, nAtomEntries, currentTimeframe, boundary, nAtoms);
 
 		file_status = fgetc (file_dump);
 		currentTimeframe++;
